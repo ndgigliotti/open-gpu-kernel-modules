@@ -28,6 +28,7 @@
 #include "nv-reg.h"
 
 #include <linux/acpi.h>
+#include <linux/power_supply.h>
 #include <acpi/video.h>
 
 #if defined(NV_LINUX_ACPI_EVENTS_SUPPORTED)
@@ -109,7 +110,15 @@ NV_STATUS NV_API_CALL nv_acpi_get_powersource(NvU32 *ac_plugged)
         return NV_ERR_INVALID_ARGUMENT;
 
     if (!psr_device_handle)
-        return NV_ERR_INVALID_ARGUMENT;
+    {
+        // Some platforms expose AC only through the Linux power-supply class.
+        status = power_supply_is_system_supplied();
+        if (status < 0)
+            return NV_ERR_NOT_SUPPORTED;
+
+        *ac_plugged = status > 0;
+        return NV_OK;
+    }
 
     // Check whether or not AC power is plugged in
     status = acpi_evaluate_integer(psr_device_handle, "_PSR", NULL, &val);
