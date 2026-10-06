@@ -252,6 +252,12 @@ static NvBool nv_power_source_dispatch(NvU32 source, NvU64 epoch)
     NvBool retry = NV_FALSE;
     DECLARE_BITMAP(visited, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1);
 
+#if defined(NV_VGPU_KVM_BUILD)
+    // Late vGPU probe failure tears down a listed device without ldata_lock.
+    // Cache queries remain available, but live dispatch needs that lifetime lock.
+    return NV_FALSE;
+#endif
+
     // Waiting here can prevent the freezable worker from reaching quiescence.
     if (!down_read_trylock(&nv_system_pm_lock))
         return NV_TRUE;
@@ -301,7 +307,7 @@ static NvBool nv_power_source_dispatch(NvU32 source, NvU64 epoch)
 #if defined(NV_PM_RUNTIME_AVAILABLE)
         pm_runtime_put(nvl->dev);
 #endif
-        if (status != NV_OK && status != NV_ERR_NOT_READY)
+        if (status != NV_OK)
         {
             retry = NV_TRUE;
             NV_DEV_PRINTF(NV_DBG_ERRORS, nv,

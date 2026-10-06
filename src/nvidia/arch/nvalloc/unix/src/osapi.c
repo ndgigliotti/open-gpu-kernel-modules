@@ -4623,7 +4623,7 @@ NV_STATUS NV_API_CALL rm_power_source_update(
                 if (nv_power_source_sample_is_current(nv, source, epoch))
                     status = RmPowerSourceChangeEvent(nv, source);
                 else
-                    status = NV_ERR_NOT_READY;
+                    status = NV_OK;
                 rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
             }
         }
