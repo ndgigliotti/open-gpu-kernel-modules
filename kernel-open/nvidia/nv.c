@@ -929,15 +929,12 @@ static int __init nvidia_init_module(void)
     }
 
 #if defined(CONFIG_PM)
-    if (NVreg_UseKernelSuspendNotifiers)
+    /* Guard supply queries even when automatic RM suspend/resume is disabled. */
+    rc = register_pm_notifier(&nv_pm_nb);
+    if (rc != 0)
     {
-        /* Register PM notifier for automatic suspend/resume */
-        rc = register_pm_notifier(&nv_pm_nb);
-        if (rc != 0)
-        {
-            nv_printf(NV_DBG_ERRORS, "NVRM: Failed to register PM notifier\n");
-            goto procfs_exit;
-        }
+        nv_printf(NV_DBG_ERRORS, "NVRM: Failed to register PM notifier\n");
+        goto procfs_exit;
     }
 #endif
 
@@ -1097,10 +1094,7 @@ caps_root_exit:
 
 pm_notifier_exit:
 #if defined(CONFIG_PM)
-    if (NVreg_UseKernelSuspendNotifiers)
-    {
-        unregister_pm_notifier(&nv_pm_nb);
-    }
+    unregister_pm_notifier(&nv_pm_nb);
 
 procfs_exit:
 #endif
@@ -1131,10 +1125,7 @@ static void __exit nvidia_exit_module(void)
     nv_caps_root_exit();
 
 #if defined(CONFIG_PM)
-    if (NVreg_UseKernelSuspendNotifiers)
-    {
-        unregister_pm_notifier(&nv_pm_nb);
-    }
+    unregister_pm_notifier(&nv_pm_nb);
 #endif
 
     nv_procfs_exit();
@@ -4625,13 +4616,18 @@ failure:
 }
 
 /*
- * PM notifier for automatic suspend/resume functionality
+ * PM notifier for supply-query admission and optional automatic RM suspend/resume.
  */
 static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *unused)
 {
     NV_STATUS status;
     nv_power_state_t power_state;
     const char *name;
+    int ret;
+
+    ret = nv_acpi_power_source_pm_event(event);
+    if ((ret & NOTIFY_STOP_MASK) || !NVreg_UseKernelSuspendNotifiers)
+        return ret;
 
     switch (event) {
     case PM_SUSPEND_PREPARE:
@@ -4651,12 +4647,17 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
         break;
 
     default:
-        return NOTIFY_DONE;
+        return ret;
     }
 
     status = nv_set_system_power_state(power_state, nv_procfs_pm_action_depth);
     if (status != NV_OK) {
         nv_printf(NV_DBG_ERRORS, "NVRM: PM %s notifier failed: 0x%x\n", name, status);
+        /* The failed notifier itself is not included in PREPARE rollback. */
+        if (event == PM_SUSPEND_PREPARE)
+            nv_acpi_power_source_pm_event(PM_POST_SUSPEND);
+        else if (event == PM_HIBERNATION_PREPARE)
+            nv_acpi_power_source_pm_event(PM_POST_HIBERNATION);
         return NOTIFY_BAD;
     }
 

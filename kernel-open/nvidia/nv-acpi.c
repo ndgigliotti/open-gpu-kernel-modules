@@ -29,6 +29,7 @@
 
 #include <linux/acpi.h>
 #include <linux/power_supply.h>
+#include <linux/suspend.h>
 #include <acpi/video.h>
 
 #if defined(NV_LINUX_ACPI_EVENTS_SUPPORTED)
@@ -53,6 +54,74 @@ static acpi_handle psr_device_handle = NULL;
 static nv_acpi_t  *psr_nv_acpi_object = NULL;
 
 static NvBool battery_present = NV_FALSE;
+
+#if defined(CONFIG_PM_SLEEP)
+static DECLARE_RWSEM(nv_power_supply_pm_lock);
+static NvBool nv_power_supply_pm_blocked;
+
+int nv_acpi_power_source_pm_event(unsigned long event)
+{
+    switch (event)
+    {
+        case PM_SUSPEND_PREPARE:
+        case PM_HIBERNATION_PREPARE:
+        case PM_RESTORE_PREPARE:
+            // Abort rather than wait for provider I/O while preparing PM.
+            if (!down_write_trylock(&nv_power_supply_pm_lock))
+                return notifier_from_errno(-EBUSY);
+            nv_power_supply_pm_blocked = NV_TRUE;
+            up_write(&nv_power_supply_pm_lock);
+            break;
+
+        case PM_POST_SUSPEND:
+        case PM_POST_HIBERNATION:
+        case PM_POST_RESTORE:
+            down_write(&nv_power_supply_pm_lock);
+            nv_power_supply_pm_blocked = NV_FALSE;
+            up_write(&nv_power_supply_pm_lock);
+            break;
+
+        default:
+            return NOTIFY_DONE;
+    }
+
+    return NOTIFY_OK;
+}
+
+static NvBool nv_power_supply_query_begin(void)
+{
+    // Never wait behind PM while the caller may hold RM locks.
+    if (!down_read_trylock(&nv_power_supply_pm_lock))
+        return NV_FALSE;
+
+    if (nv_power_supply_pm_blocked)
+    {
+        up_read(&nv_power_supply_pm_lock);
+        return NV_FALSE;
+    }
+
+    return NV_TRUE;
+}
+
+static void nv_power_supply_query_end(void)
+{
+    up_read(&nv_power_supply_pm_lock);
+}
+#else
+int nv_acpi_power_source_pm_event(unsigned long event)
+{
+    return NOTIFY_DONE;
+}
+
+static NvBool nv_power_supply_query_begin(void)
+{
+    return NV_TRUE;
+}
+
+static void nv_power_supply_query_end(void)
+{
+}
+#endif
 
 #define BIX_BATTERY_TECHNOLOGY_OFFSET 0x4
 #define BIF_BATTERY_TECHNOLOGY_OFFSET 0x3
@@ -111,8 +180,12 @@ NV_STATUS NV_API_CALL nv_acpi_get_powersource(NvU32 *ac_plugged)
 
     if (!psr_device_handle)
     {
+        if (!nv_power_supply_query_begin())
+            return NV_ERR_NOT_SUPPORTED;
+
         // Some platforms expose AC only through the Linux power-supply class.
         status = power_supply_is_system_supplied();
+        nv_power_supply_query_end();
         if (status < 0)
             return NV_ERR_NOT_SUPPORTED;
 
@@ -1432,6 +1505,11 @@ NV_STATUS NV_API_CALL nv_acpi_d3cold_dsm_for_upstream_port(
 }
 
 #else // NV_LINUX_ACPI_EVENTS_SUPPORTED
+
+int nv_acpi_power_source_pm_event(unsigned long event)
+{
+    return NOTIFY_DONE;
+}
 
 void NV_API_CALL nv_acpi_methods_init(NvU32 *handlePresent)
 {
