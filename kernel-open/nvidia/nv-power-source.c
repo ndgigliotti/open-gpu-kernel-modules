@@ -33,10 +33,15 @@ static NvBool nv_power_source_notifier_registered;
 static NvBool nv_power_source_reboot_registered;
 static struct workqueue_struct *nv_power_source_wq;
 static NvU64 nv_power_source_epoch;
-static unsigned int nv_power_source_reports;
+static NvU64 nv_power_source_request_epoch;
+static NvU64 nv_power_source_retry_epoch;
+static unsigned int nv_power_source_retries;
+#define NV_POWER_SOURCE_RETRY_LIMIT 8
 static int nv_power_source_status = -ENODEV;
 static void nv_power_source_work(struct work_struct *work);
 static DECLARE_WORK(nv_power_source_sample_work, nv_power_source_work);
+static void nv_power_source_retry_work(struct work_struct *work);
+static DECLARE_DELAYED_WORK(nv_power_source_retry, nv_power_source_retry_work);
 
 struct nv_power_source_sample {
     NvBool readable;
@@ -101,7 +106,7 @@ static int nv_power_source_read(void)
 
 static void nv_power_source_queue_locked(void)
 {
-    if (nv_power_source_wq != NULL && nv_power_source_reports == 0)
+    if (nv_power_source_wq != NULL)
         queue_work(nv_power_source_wq, &nv_power_source_sample_work);
 }
 
@@ -111,40 +116,87 @@ void nv_power_source_refresh(void)
 
     spin_lock_irqsave(&nv_power_source_lock, flags);
     nv_power_source_epoch++;
+    nv_power_source_request_epoch = nv_power_source_epoch;
     nv_power_source_status = -ENODEV;
+    nv_power_source_retries = 0;
     nv_power_source_queue_locked();
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
 }
 
-// Called around an explicit userspace SET_POWERSTATE, outside the API lock.
-// The global epoch conservatively invalidates samples for every GPU.
-void NV_API_CALL nv_power_source_report(NvBool begin)
+void nv_power_source_refresh_device(nv_state_t *nv)
 {
     unsigned long flags;
 
     spin_lock_irqsave(&nv_power_source_lock, flags);
+    if (nv != NULL)
+        nv->power_source_valid = NV_FALSE;
     nv_power_source_epoch++;
+    nv_power_source_request_epoch = nv_power_source_epoch;
     nv_power_source_status = -ENODEV;
-    if (begin)
-        nv_power_source_reports++;
-    else if (!WARN_ON(nv_power_source_reports == 0))
-        nv_power_source_reports--;
-    if (!begin)
-        nv_power_source_queue_locked();
+    nv_power_source_retries = 0;
+    nv_power_source_queue_locked();
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
 }
 
-NvBool NV_API_CALL nv_power_source_sample_is_current(NvU64 epoch)
+// Only validated, successful common RM setters call this under API/GPU locks.
+void NV_API_CALL nv_power_source_report(nv_state_t *nv, NvU32 source,
+                                       NvBool from_provider)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&nv_power_source_lock, flags);
+    nv->power_source_value = source;
+    nv->power_source_valid = NV_TRUE;
+    if (!from_provider)
+    {
+        // Reject an older sample without immediately undoing this report.
+        nv_power_source_epoch++;
+        nv_power_source_status = -ENODEV;
+    }
+    spin_unlock_irqrestore(&nv_power_source_lock, flags);
+}
+
+NvBool NV_API_CALL nv_power_source_sample_is_current(nv_state_t *nv,
+                                                    NvU32 source, NvU64 epoch)
 {
     unsigned long flags;
     NvBool sample_current;
 
     spin_lock_irqsave(&nv_power_source_lock, flags);
     sample_current = nv_power_source_wq != NULL &&
-              nv_power_source_epoch == epoch &&
-              nv_power_source_reports == 0 && nv_power_source_status >= 0;
+              nv_power_source_epoch == epoch && nv_power_source_status >= 0 &&
+              (!nv->power_source_valid || nv->power_source_value != source);
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
     return sample_current && nv_acpi_uses_power_supply();
+}
+
+static void nv_power_source_retry_work(struct work_struct *work)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&nv_power_source_lock, flags);
+    if (nv_power_source_retry_epoch == nv_power_source_epoch &&
+        nv_power_source_request_epoch == nv_power_source_epoch)
+        nv_power_source_queue_locked();
+    spin_unlock_irqrestore(&nv_power_source_lock, flags);
+}
+
+static void nv_power_source_schedule_retry(NvU64 epoch)
+{
+    unsigned long flags;
+    unsigned int shift;
+
+    spin_lock_irqsave(&nv_power_source_lock, flags);
+    if (nv_power_source_wq != NULL && epoch == nv_power_source_epoch &&
+        nv_power_source_retries < NV_POWER_SOURCE_RETRY_LIMIT)
+    {
+        shift = nv_power_source_retries < 4 ? nv_power_source_retries : 4;
+        nv_power_source_retry_epoch = epoch;
+        nv_power_source_retries++;
+        mod_delayed_work(nv_power_source_wq, &nv_power_source_retry,
+                         msecs_to_jiffies(100U << shift));
+    }
+    spin_unlock_irqrestore(&nv_power_source_lock, flags);
 }
 
 NV_STATUS nv_power_source_get(NvU32 *ac_plugged)
@@ -155,6 +207,8 @@ NV_STATUS nv_power_source_get(NvU32 *ac_plugged)
     spin_lock_irqsave(&nv_power_source_lock, flags);
     status = nv_power_source_wq == NULL ? -ENODEV : nv_power_source_status;
     // Re-sample even a valid cache: removal need not emit a change event.
+    nv_power_source_retries = 0;
+    nv_power_source_request_epoch = nv_power_source_epoch;
     nv_power_source_queue_locked();
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
     if (status < 0)
@@ -189,48 +243,73 @@ static int nv_power_source_pin_active(struct device *dev)
 }
 #endif
 
-static void nv_power_source_dispatch(NvU32 source, NvU64 epoch)
+static NvBool nv_power_source_dispatch(NvU32 source, NvU64 epoch)
 {
     nv_linux_state_t *nvl;
     nvidia_stack_t *sp = NULL;
     nv_state_t *nv;
     NV_STATUS status;
+    NvBool retry = NV_FALSE;
+    DECLARE_BITMAP(visited, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1);
 
-    // Do not wait behind system PM. A later RM resume can use the fresh cache.
+    // Waiting here can prevent the freezable worker from reaching quiescence.
     if (!down_read_trylock(&nv_system_pm_lock))
-        return;
+        return NV_TRUE;
     if (nv_kmem_cache_alloc_stack(&sp) != 0)
-        goto pm_unlock;
-
-    LOCK_NV_LINUX_DEVICES();
-    for (nvl = nv_linux_devices; nvl != NULL; nvl = nvl->next)
     {
-        down(&nvl->ldata_lock);
+        retry = NV_TRUE;
+        goto pm_unlock;
+    }
+
+    bitmap_zero(visited, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1);
+    for (;;)
+    {
+        LOCK_NV_LINUX_DEVICES();
+        for (nvl = nv_linux_devices; nvl != NULL; nvl = nvl->next)
+        {
+            if (test_bit(nvl->minor_num, visited))
+                continue;
+            set_bit(nvl->minor_num, visited);
+            if (down_trylock(&nvl->ldata_lock) == 0)
+                break;
+            retry = NV_TRUE;
+        }
+        UNLOCK_NV_LINUX_DEVICES();
+        if (nvl == NULL)
+            break;
+
+        // PCI/platform removal needs ldata_lock before unlink/teardown.
+        // Do not retain list pointers after releasing this lifetime lock.
         nv = NV_STATE_PTR(nvl);
         if ((nv->flags & NV_FLAG_INITIALIZED) == 0 ||
             (nv->flags & NV_FLAG_SUSPENDED) != 0 ||
             atomic64_read(&nvl->usage_count) == 0)
             goto device_unlock;
 #if defined(NV_PM_RUNTIME_AVAILABLE)
-        // Fine RTD3 can leave active clients with a zero runtime-PM count.
-        // Client use is checked separately; this never resumes a device.
+        // Client use is separate from the fine-RTD3 runtime-PM counter.
         if (nv_power_source_pin_active(nvl->dev) <= 0)
+        {
+            retry = NV_TRUE;
             goto device_unlock;
+        }
 #endif
         status = rm_power_source_update(sp, nv, source, epoch);
 #if defined(NV_PM_RUNTIME_AVAILABLE)
         pm_runtime_put(nvl->dev);
 #endif
         if (status != NV_OK && status != NV_ERR_NOT_READY)
+        {
+            retry = NV_TRUE;
             NV_DEV_PRINTF(NV_DBG_ERRORS, nv,
                           "power-source refresh failed: 0x%x\n", status);
+        }
 device_unlock:
         up(&nvl->ldata_lock);
     }
-    UNLOCK_NV_LINUX_DEVICES();
     nv_kmem_cache_free_stack(sp);
 pm_unlock:
     up_read(&nv_system_pm_lock);
+    return retry;
 }
 
 static void nv_power_source_work(struct work_struct *work)
@@ -240,12 +319,13 @@ static void nv_power_source_work(struct work_struct *work)
     int status;
 
     spin_lock_irqsave(&nv_power_source_lock, flags);
-    if (nv_power_source_wq == NULL || nv_power_source_reports != 0)
+    if (nv_power_source_wq == NULL ||
+        nv_power_source_request_epoch != nv_power_source_epoch)
     {
         spin_unlock_irqrestore(&nv_power_source_lock, flags);
         return;
     }
-    epoch = nv_power_source_epoch;
+    epoch = nv_power_source_request_epoch;
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
 
     if (!nv_acpi_uses_power_supply())
@@ -254,22 +334,27 @@ static void nv_power_source_work(struct work_struct *work)
     // Provider I/O precedes every GPU reference and RM/API/GPU lock.
     status = nv_power_source_read();
     spin_lock_irqsave(&nv_power_source_lock, flags);
-    if (nv_power_source_wq == NULL || epoch != nv_power_source_epoch ||
-        nv_power_source_reports != 0)
+    if (nv_power_source_wq == NULL || epoch != nv_power_source_epoch)
     {
         spin_unlock_irqrestore(&nv_power_source_lock, flags);
         return;
     }
     nv_power_source_status = status;
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
-    if (status >= 0 && nv_acpi_uses_power_supply())
-        nv_power_source_dispatch(!status, epoch);
+    if (status < 0)
+        nv_power_source_schedule_retry(epoch);
+    else if (nv_acpi_uses_power_supply() &&
+             nv_power_source_dispatch(!status, epoch))
+        nv_power_source_schedule_retry(epoch);
 }
 
 static int nv_power_source_changed(struct notifier_block *nb,
                                    unsigned long event, void *data)
 {
-    if (event == PSY_EVENT_PROP_CHANGED)
+    struct power_supply *psy = data;
+
+    if (event == PSY_EVENT_PROP_CHANGED &&
+        (psy == NULL || psy->desc->type != POWER_SUPPLY_TYPE_BATTERY))
         nv_power_source_refresh();
     return NOTIFY_DONE;
 }
@@ -294,6 +379,7 @@ static void nv_power_source_stop(void)
     if (wq != NULL)
     {
         // Pending work cannot execute while hibernation keeps this queue frozen.
+        cancel_delayed_work_sync(&nv_power_source_retry);
         cancel_work_sync(&nv_power_source_sample_work);
         destroy_workqueue(wq);
     }
@@ -357,8 +443,11 @@ void nv_power_source_exit(void)
 int nv_power_source_init(void) { return 0; }
 void nv_power_source_exit(void) { }
 void nv_power_source_refresh(void) { }
-void NV_API_CALL nv_power_source_report(NvBool begin) { }
-NvBool NV_API_CALL nv_power_source_sample_is_current(NvU64 epoch)
+void nv_power_source_refresh_device(nv_state_t *nv) { }
+void NV_API_CALL nv_power_source_report(nv_state_t *nv, NvU32 source,
+                                       NvBool from_provider) { }
+NvBool NV_API_CALL nv_power_source_sample_is_current(nv_state_t *nv,
+                                                    NvU32 source, NvU64 epoch)
 {
     return NV_FALSE;
 }

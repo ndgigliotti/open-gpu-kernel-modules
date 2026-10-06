@@ -1878,6 +1878,8 @@ static int nv_open_device(nv_state_t *nv, nvidia_stack_t *sp)
     nv_assert_not_in_gpu_exclusion_list(sp, nv);
 
     atomic64_inc(&nvl->usage_count);
+    if (atomic64_read(&nvl->usage_count) == 1)
+        nv_power_source_refresh_device(nv);
 
     return 0;
 }
@@ -5189,15 +5191,19 @@ done:
 
 static int nv_pmops_prepare(struct device *dev)
 {
+    nv_linux_state_t *nvl = dev_get_drvdata(dev);
+
     // No provider I/O, wait, or veto after the hibernation marker is consumed.
-    nv_power_source_refresh();
+    nv_power_source_refresh_device(nvl == NULL ? NULL : NV_STATE_PTR(nvl));
     return 0;
 }
 
 static void nv_pmops_complete(struct device *dev)
 {
+    nv_linux_state_t *nvl = dev_get_drvdata(dev);
+
     // The freezable worker runs after providers resume and workqueues thaw.
-    nv_power_source_refresh();
+    nv_power_source_refresh_device(nvl == NULL ? NULL : NV_STATE_PTR(nvl));
 }
 
 int nv_pmops_suspend(
@@ -5378,6 +5384,9 @@ int nv_pmops_runtime_resume(
     }
 #endif
 
+    // PM core marks ACTIVE after this callback; a bounded retry covers that gap.
+    nv_power_source_refresh_device(NV_STATE_PTR((nv_linux_state_t *)
+                                  dev_get_drvdata(dev)));
     return err;
 
 #if defined(CONFIG_PM_DEVFREQ)

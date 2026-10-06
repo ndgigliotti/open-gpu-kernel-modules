@@ -35,6 +35,7 @@ NvBool      nv_acpi_uses_power_supply   (void);
 int         nv_power_source_init       (void);
 void        nv_power_source_exit       (void);
 void        nv_power_source_refresh    (void);
+void        nv_power_source_refresh_device(nv_state_t *);
 NV_STATUS   nv_power_source_get        (NvU32 *);
 
 NvU8        nv_find_pci_capability      (struct pci_dev *, NvU8);

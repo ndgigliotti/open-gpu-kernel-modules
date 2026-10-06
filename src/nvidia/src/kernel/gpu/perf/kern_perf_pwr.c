@@ -277,6 +277,11 @@ kperfPerfSetPowerstate_KERNEL
         NV_PRINTF(LEVEL_ERROR, "NV2080_CTRL_CMD_PERF_SET_POWERSTATE RPC failed\n");
     }
 
+    // Record successful source changes after validation under RM API/GPU locks.
+    if (status == NV_OK)
+        osReportPowerSource(pGpu->pOsGpuInfo,
+                            pPowerInfoParams->powerStateInfo.powerState);
+
     // If callback was registered, update platform with the current Auxpower state(Dx)
     _kperfSendPostPowerStateCallback(pGpu, pKernelPerf);
 

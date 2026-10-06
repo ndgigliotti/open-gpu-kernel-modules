@@ -1314,14 +1314,19 @@ NV_STATUS RmPowerSourceChangeEvent(
 {
     NV2080_CTRL_PERF_SET_POWERSTATE_PARAMS params = {0};
     RM_API *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+    NvBool from_provider = pNv->power_source_from_provider;
+    NV_STATUS status;
 
     params.powerStateInfo.powerState = event_val ? NV2080_CTRL_PERF_POWER_SOURCE_BATTERY :
                                                    NV2080_CTRL_PERF_POWER_SOURCE_AC;
 
-    return pRmApi->Control(pRmApi, pNv->rmapi.hClient,
-                           pNv->rmapi.hSubDevice,
-                           NV2080_CTRL_CMD_PERF_SET_POWERSTATE,
-                           &params, sizeof(params));
+    pNv->power_source_from_provider = NV_TRUE;
+    status = pRmApi->Control(pRmApi, pNv->rmapi.hClient,
+                            pNv->rmapi.hSubDevice,
+                            NV2080_CTRL_CMD_PERF_SET_POWERSTATE,
+                            &params, sizeof(params));
+    pNv->power_source_from_provider = from_provider;
+    return status;
 }
 
 /*!
@@ -4582,6 +4587,14 @@ NV_STATUS NV_API_CALL rm_perform_version_check(
     return rmStatus;
 }
 
+void osReportPowerSource(void *pOsGpuInfo, NvU32 source)
+{
+    nv_state_t *nv = pOsGpuInfo;
+
+    if (nv != NULL)
+        nv_power_source_report(nv, source, nv->power_source_from_provider);
+}
+
 // The OS caller pins an already-active device and its lifetime. This entry
 // never acquires a dynamic-power reference or selects GPU0.
 NV_STATUS NV_API_CALL rm_power_source_update(
@@ -4598,16 +4611,16 @@ NV_STATUS NV_API_CALL rm_power_source_update(
 
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_EVENT);
+    status = rmapiLockAcquire(API_LOCK_FLAGS_COND_ACQUIRE, RM_LOCK_MODULES_EVENT);
     if (status == NV_OK)
     {
         pGpu = NV_GET_NV_PRIV_PGPU(nv);
         if ((pGpu != NULL) && IsMobile(pGpu))
         {
-            status = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_EVENT);
+            status = rmGpuLocksAcquire(GPU_LOCK_FLAGS_COND_ACQUIRE, RM_LOCK_MODULES_EVENT);
             if (status == NV_OK)
             {
-                if (nv_power_source_sample_is_current(epoch))
+                if (nv_power_source_sample_is_current(nv, source, epoch))
                     status = RmPowerSourceChangeEvent(nv, source);
                 else
                     status = NV_ERR_NOT_READY;
