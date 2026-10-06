@@ -267,6 +267,10 @@ static NvBool nv_power_source_dispatch(NvU32 source, NvU64 epoch)
         LOCK_NV_LINUX_DEVICES();
         for (nvl = nv_linux_devices; nvl != NULL; nvl = nvl->next)
         {
+            // Platform-display teardown can precede its ldata_lock.
+            // Only PCI removal serializes teardown with our lifetime lock.
+            if (nvl->pci_dev == NULL)
+                continue;
             if (test_bit(nvl->minor_num, visited))
                 continue;
             set_bit(nvl->minor_num, visited);
@@ -278,7 +282,7 @@ static NvBool nv_power_source_dispatch(NvU32 source, NvU64 epoch)
         if (nvl == NULL)
             break;
 
-        // PCI/platform removal needs ldata_lock before unlink/teardown.
+        // PCI removal needs ldata_lock before unlink/teardown.
         // Do not retain list pointers after releasing this lifetime lock.
         nv = NV_STATE_PTR(nvl);
         if ((nv->flags & NV_FLAG_INITIALIZED) == 0 ||
