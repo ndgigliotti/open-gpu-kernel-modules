@@ -43,6 +43,7 @@
 --undefined=rm_release_all_gpus_lock
 --undefined=rm_shutdown_rm
 --undefined=rm_power_source_change_event
+--undefined=rm_power_source_update
 --undefined=rm_request_dnotifier_state
 --undefined=rm_write_registry_binary
 --undefined=rm_write_registry_dword
