@@ -968,7 +968,8 @@ static int __init nvidia_init_module(void)
 
     rc = nv_power_source_init();
     if (rc != 0)
-        goto module_exit;
+        nv_printf(NV_DBG_ERRORS,
+                  "NVRM: power-source fallback unavailable: %d\n", rc);
 
     count = nvos_count_devices(&num_pci_devices, &num_platform_devices);
     if ((count == 0) && (!is_nvswitch_present))
@@ -1109,7 +1110,9 @@ caps_root_exit:
 pm_notifier_exit:
 #if defined(CONFIG_PM)
     if (NVreg_UseKernelSuspendNotifiers)
+    {
         unregister_pm_notifier(&nv_pm_nb);
+    }
 
 procfs_exit:
 #endif
@@ -1143,7 +1146,9 @@ static void __exit nvidia_exit_module(void)
 
 #if defined(CONFIG_PM)
     if (NVreg_UseKernelSuspendNotifiers)
+    {
         unregister_pm_notifier(&nv_pm_nb);
+    }
 #endif
 
     nv_procfs_exit();
@@ -4633,6 +4638,9 @@ failure:
     return status;
 }
 
+/*
+ * PM notifier for automatic suspend/resume functionality
+ */
 static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *unused)
 {
     NV_STATUS status;

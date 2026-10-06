@@ -2673,6 +2673,26 @@ compile_test() {
             compile_check_conftest "$CODE" "NV_POWER_SUPPLY_FOR_EACH_DEVICE_PRESENT" "" "generic"
         ;;
 
+        pm_runtime_get_if_active)
+            CODE="
+            #include <linux/pm_runtime.h>
+            typeof(&pm_runtime_get_if_active) conftest_pm_runtime_get_if_active_ptr;
+            int conftest_pm_runtime_get_if_active(struct device *dev) {
+                return pm_runtime_get_if_active(dev);
+            }"
+            compile_check_conftest "$CODE" "NV_PM_RUNTIME_GET_IF_ACTIVE_PRESENT" "" "generic"
+        ;;
+
+        pm_runtime_get_if_active_has_usage_count)
+            CODE="
+            #include <linux/pm_runtime.h>
+            typeof(&pm_runtime_get_if_active) conftest_pm_runtime_get_if_active_ptr;
+            int conftest_pm_runtime_get_if_active(struct device *dev) {
+                return pm_runtime_get_if_active(dev, true);
+            }"
+            compile_check_conftest "$CODE" "NV_PM_RUNTIME_GET_IF_ACTIVE_HAS_USAGE_COUNT" "" "generic"
+        ;;
+
         pm_runtime_available)
             #
             # Determine if struct dev_pm_info has the 'usage_count' field.

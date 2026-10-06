@@ -1,5 +1,4 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 1999-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -164,6 +163,32 @@ NV_STATUS nv_power_source_get(NvU32 *ac_plugged)
     return NV_OK;
 }
 
+#if defined(NV_PM_RUNTIME_AVAILABLE)
+static int nv_power_source_pin_active(struct device *dev)
+{
+#if defined(NV_PM_RUNTIME_GET_IF_ACTIVE_PRESENT)
+    return pm_runtime_get_if_active(dev);
+#elif defined(NV_PM_RUNTIME_GET_IF_ACTIVE_HAS_USAGE_COUNT)
+    return pm_runtime_get_if_active(dev, NV_TRUE);
+#else
+    unsigned long flags;
+    int status = 0;
+
+    // Older kernels lack get_if_active. Serialize the non-waking reference
+    // with runtime-state transitions, including the zero-PM-count case.
+    spin_lock_irqsave(&dev->power.lock, flags);
+    if (dev->power.disable_depth == 0 &&
+        dev->power.runtime_status == RPM_ACTIVE)
+    {
+        pm_runtime_get_noresume(dev);
+        status = 1;
+    }
+    spin_unlock_irqrestore(&dev->power.lock, flags);
+    return status;
+#endif
+}
+#endif
+
 static void nv_power_source_dispatch(NvU32 source, NvU64 epoch)
 {
     nv_linux_state_t *nvl;
@@ -183,14 +208,13 @@ static void nv_power_source_dispatch(NvU32 source, NvU64 epoch)
         down(&nvl->ldata_lock);
         nv = NV_STATE_PTR(nvl);
         if ((nv->flags & NV_FLAG_INITIALIZED) == 0 ||
-            (nv->flags & NV_FLAG_SUSPENDED) != 0)
+            (nv->flags & NV_FLAG_SUSPENDED) != 0 ||
+            atomic64_read(&nvl->usage_count) == 0)
             goto device_unlock;
 #if defined(NV_PM_RUNTIME_AVAILABLE)
-        // This takes no reference on a suspended or unused device.
-        if (pm_runtime_get_if_in_use(nvl->dev) <= 0)
-            goto device_unlock;
-#else
-        if (atomic64_read(&nvl->usage_count) == 0)
+        // Fine RTD3 can leave active clients with a zero runtime-PM count.
+        // Client use is checked separately; this never resumes a device.
+        if (nv_power_source_pin_active(nvl->dev) <= 0)
             goto device_unlock;
 #endif
         status = rm_power_source_update(sp, nv, source, epoch);
@@ -268,7 +292,11 @@ static void nv_power_source_stop(void)
     spin_unlock_irqrestore(&nv_power_source_lock, flags);
     // No RM/device lock is held while in-flight sampling/dispatch drains.
     if (wq != NULL)
+    {
+        // Pending work cannot execute while hibernation keeps this queue frozen.
+        cancel_work_sync(&nv_power_source_sample_work);
         destroy_workqueue(wq);
+    }
     mutex_unlock(&nv_power_source_stop_lock);
 }
 
