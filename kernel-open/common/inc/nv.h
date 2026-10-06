@@ -1247,6 +1247,10 @@ NV_STATUS  NV_API_CALL  rm_perform_version_check  (nvidia_stack_t *, void *, NvU
 
 void       NV_API_CALL  rm_power_source_change_event        (nvidia_stack_t *, NvU32);
 
+NV_STATUS  NV_API_CALL  rm_power_source_update(nvidia_stack_t *, nv_state_t *, NvU32, NvU64);
+NvBool     NV_API_CALL  nv_power_source_sample_is_current(NvU64);
+void       NV_API_CALL  nv_power_source_report(NvBool);
+
 void       NV_API_CALL  rm_request_dnotifier_state          (nvidia_stack_t *, nv_state_t *);
 
 void       NV_API_CALL  rm_disable_gpu_state_persistence    (nvidia_stack_t *sp, nv_state_t *);

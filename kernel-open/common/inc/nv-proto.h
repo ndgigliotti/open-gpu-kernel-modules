@@ -31,7 +31,11 @@ extern const char *nv_device_name;
 
 void        nv_acpi_register_notifier   (nv_linux_state_t *);
 void        nv_acpi_unregister_notifier (nv_linux_state_t *);
-int         nv_acpi_power_source_pm_event(unsigned long);
+NvBool      nv_acpi_uses_power_supply   (void);
+int         nv_power_source_init       (void);
+void        nv_power_source_exit       (void);
+void        nv_power_source_refresh    (void);
+NV_STATUS   nv_power_source_get        (NvU32 *);
 
 NvU8        nv_find_pci_capability      (struct pci_dev *, NvU8);
 

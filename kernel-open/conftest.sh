@@ -2656,6 +2656,23 @@ compile_test() {
             compile_check_conftest "$CODE" "NV_VMF_INSERT_PFN_PRESENT" "" "functions"
         ;;
 
+        power_supply_for_each_psy)
+            # Newer kernels hide power_supply_class behind this iterator.
+            CODE="
+            #include <linux/power_supply.h>
+            typeof(&power_supply_for_each_psy) conftest_power_supply_iterator;
+            "
+            compile_check_conftest "$CODE" "NV_POWER_SUPPLY_FOR_EACH_PSY_PRESENT" "" "generic"
+        ;;
+
+        power_supply_for_each_device)
+            CODE="
+            #include <linux/power_supply.h>
+            typeof(&power_supply_for_each_device) conftest_power_supply_iterator;
+            "
+            compile_check_conftest "$CODE" "NV_POWER_SUPPLY_FOR_EACH_DEVICE_PRESENT" "" "generic"
+        ;;
+
         pm_runtime_available)
             #
             # Determine if struct dev_pm_info has the 'usage_count' field.

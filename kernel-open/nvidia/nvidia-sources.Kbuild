@@ -14,6 +14,7 @@ NVIDIA_SOURCES += nvidia/nv-pci.c
 NVIDIA_SOURCES += nvidia/nv-dmabuf.c
 NVIDIA_SOURCES += nvidia/nv-nano-timer.c
 NVIDIA_SOURCES += nvidia/nv-acpi.c
+NVIDIA_SOURCES += nvidia/nv-power-source.c
 NVIDIA_SOURCES += nvidia/nv-cray.c
 NVIDIA_SOURCES += nvidia/nv-dma.c
 NVIDIA_SOURCES += nvidia/nv-i2c.c

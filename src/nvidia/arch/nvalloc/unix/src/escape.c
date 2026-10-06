@@ -51,6 +51,7 @@
 #include <nv-ioctl-lockless-diag.h>
 
 #include <ctrl/ctrl00fd.h>
+#include <ctrl/ctrl2080/ctrl2080perf.h>
 
 #include <ctrl/ctrl00e0.h>
 
@@ -800,6 +801,7 @@ NV_STATUS RmIoctl(
             nv_file_private_t *dev_nvfp = NULL;
             NvS32 fd;
             NvBool bSkipDeviceRef;
+            NvBool bPowerSourceReport;
 
             if (dataSize != sizeof(*pApi))
             {
@@ -841,7 +843,14 @@ NV_STATUS RmIoctl(
                 secInfo.gpuOsInfo = priv;
             }
 
+            // Bracket explicit reports so older provider samples cannot win
+            // after a source report serialized through the RM API lock.
+            bPowerSourceReport = pApi->cmd == NV2080_CTRL_CMD_PERF_SET_POWERSTATE;
+            if (bPowerSourceReport)
+                nv_power_source_report(NV_TRUE);
             Nv04ControlWithSecInfo(pApi, secInfo);
+            if (bPowerSourceReport)
+                nv_power_source_report(NV_FALSE);
 
             if ((pApi->status != NV_OK) && (priv != NULL))
             {

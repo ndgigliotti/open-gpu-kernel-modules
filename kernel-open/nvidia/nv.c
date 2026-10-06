@@ -269,6 +269,8 @@ static struct file_operations nvidia_fops = {
 };
 
 #if defined(CONFIG_PM)
+static int           nv_pmops_prepare          (struct device *dev);
+static void          nv_pmops_complete         (struct device *dev);
 static int           nv_pmops_suspend          (struct device *dev);
 static int           nv_pmops_resume           (struct device *dev);
 static int           nv_pmops_freeze           (struct device *dev);
@@ -279,6 +281,8 @@ static int           nv_pmops_runtime_suspend  (struct device *dev);
 static int           nv_pmops_runtime_resume   (struct device *dev);
 
 struct dev_pm_ops nv_pm_ops = {
+    .prepare         = nv_pmops_prepare,
+    .complete        = nv_pmops_complete,
     .suspend         = nv_pmops_suspend,
     .resume          = nv_pmops_resume,
     .freeze          = nv_pmops_freeze,
@@ -929,12 +933,15 @@ static int __init nvidia_init_module(void)
     }
 
 #if defined(CONFIG_PM)
-    /* Guard supply queries even when automatic RM suspend/resume is disabled. */
-    rc = register_pm_notifier(&nv_pm_nb);
-    if (rc != 0)
+    if (NVreg_UseKernelSuspendNotifiers)
     {
-        nv_printf(NV_DBG_ERRORS, "NVRM: Failed to register PM notifier\n");
-        goto procfs_exit;
+        /* Register PM notifier for automatic suspend/resume */
+        rc = register_pm_notifier(&nv_pm_nb);
+        if (rc != 0)
+        {
+            nv_printf(NV_DBG_ERRORS, "NVRM: Failed to register PM notifier\n");
+            goto procfs_exit;
+        }
     }
 #endif
 
@@ -958,6 +965,10 @@ static int __init nvidia_init_module(void)
         nv_printf(NV_DBG_ERRORS, "NVRM: failed to initialize module.\n");
         goto caps_imex_exit;
     }
+
+    rc = nv_power_source_init();
+    if (rc != 0)
+        goto module_exit;
 
     count = nvos_count_devices(&num_pci_devices, &num_platform_devices);
     if ((count == 0) && (!is_nvswitch_present))
@@ -1076,14 +1087,17 @@ partial_chrdev_exit:
         &nv_linux_devices_cdev);
 
 drivers_exit:
+    nv_power_source_exit();
     nv_drivers_exit();
 
 uvm_exit:
+    nv_power_source_exit();
 #if defined(NV_UVM_ENABLE)
     nv_uvm_exit();
 #endif
 
 module_exit:
+    nv_power_source_exit();
     nv_module_exit(sp);
 
 caps_imex_exit:
@@ -1094,7 +1108,8 @@ caps_root_exit:
 
 pm_notifier_exit:
 #if defined(CONFIG_PM)
-    unregister_pm_notifier(&nv_pm_nb);
+    if (NVreg_UseKernelSuspendNotifiers)
+        unregister_pm_notifier(&nv_pm_nb);
 
 procfs_exit:
 #endif
@@ -1112,6 +1127,8 @@ static void __exit nvidia_exit_module(void)
     nv_unregister_chrdev(0, NV_MINOR_DEVICE_NUMBER_REGULAR_MAX + 1,
         &nv_linux_devices_cdev);
 
+    nv_power_source_exit();
+
 #if defined(NV_UVM_ENABLE)
     nv_uvm_exit();
 #endif
@@ -1125,7 +1142,8 @@ static void __exit nvidia_exit_module(void)
     nv_caps_root_exit();
 
 #if defined(CONFIG_PM)
-    unregister_pm_notifier(&nv_pm_nb);
+    if (NVreg_UseKernelSuspendNotifiers)
+        unregister_pm_notifier(&nv_pm_nb);
 #endif
 
     nv_procfs_exit();
@@ -4615,19 +4633,11 @@ failure:
     return status;
 }
 
-/*
- * PM notifier for supply-query admission and optional automatic RM suspend/resume.
- */
 static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *unused)
 {
     NV_STATUS status;
     nv_power_state_t power_state;
     const char *name;
-    int ret;
-
-    ret = nv_acpi_power_source_pm_event(event);
-    if ((ret & NOTIFY_STOP_MASK) || !NVreg_UseKernelSuspendNotifiers)
-        return ret;
 
     switch (event) {
     case PM_SUSPEND_PREPARE:
@@ -4647,17 +4657,12 @@ static int nv_pm_notifier(struct notifier_block *nb, unsigned long event, void *
         break;
 
     default:
-        return ret;
+        return NOTIFY_DONE;
     }
 
     status = nv_set_system_power_state(power_state, nv_procfs_pm_action_depth);
     if (status != NV_OK) {
         nv_printf(NV_DBG_ERRORS, "NVRM: PM %s notifier failed: 0x%x\n", name, status);
-        /* The failed notifier itself is not included in PREPARE rollback. */
-        if (event == PM_SUSPEND_PREPARE)
-            nv_acpi_power_source_pm_event(PM_POST_SUSPEND);
-        else if (event == PM_HIBERNATION_PREPARE)
-            nv_acpi_power_source_pm_event(PM_POST_HIBERNATION);
         return NOTIFY_BAD;
     }
 
@@ -5172,6 +5177,19 @@ done:
     up(&nv_system_power_state_lock);
 
     return status;
+}
+
+static int nv_pmops_prepare(struct device *dev)
+{
+    // No provider I/O, wait, or veto after the hibernation marker is consumed.
+    nv_power_source_refresh();
+    return 0;
+}
+
+static void nv_pmops_complete(struct device *dev)
+{
+    // The freezable worker runs after providers resume and workqueues thaw.
+    nv_power_source_refresh();
 }
 
 int nv_pmops_suspend(

@@ -4582,6 +4582,45 @@ NV_STATUS NV_API_CALL rm_perform_version_check(
     return rmStatus;
 }
 
+// The OS caller pins an already-active device and its lifetime. This entry
+// never acquires a dynamic-power reference or selects GPU0.
+NV_STATUS NV_API_CALL rm_power_source_update(
+    nvidia_stack_t *sp,
+    nv_state_t *nv,
+    NvU32 source,
+    NvU64 epoch
+)
+{
+    THREAD_STATE_NODE threadState;
+    void *fp;
+    NV_STATUS status;
+    OBJGPU *pGpu;
+
+    NV_ENTER_RM_RUNTIME(sp, fp);
+    threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
+    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_EVENT);
+    if (status == NV_OK)
+    {
+        pGpu = NV_GET_NV_PRIV_PGPU(nv);
+        if ((pGpu != NULL) && IsMobile(pGpu))
+        {
+            status = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_EVENT);
+            if (status == NV_OK)
+            {
+                if (nv_power_source_sample_is_current(epoch))
+                    status = RmPowerSourceChangeEvent(nv, source);
+                else
+                    status = NV_ERR_NOT_READY;
+                rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+            }
+        }
+        rmapiLockRelease();
+    }
+    threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
+    NV_EXIT_RM_RUNTIME(sp, fp);
+    return status;
+}
+
 //
 // Handles the Power Source Change event(AC/DC) for Notebooks.
 // Notebooks from Maxwell have only one Gpu, so this functions grabs first Gpu
